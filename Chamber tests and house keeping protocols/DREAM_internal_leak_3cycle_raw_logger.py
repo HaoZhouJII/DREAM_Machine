@@ -22,18 +22,16 @@ Default sequence
    - LI-850 samples valve 3.
    - Valves 1&2 are bypassed.
 
-3) 2 min pre-injection stabilisation:
-   - LI-850 samples valve 1&2.
-
-4) CO2 injection:
-   - CO2 MFC is set to 200 mLn/min.
-   - LI-850 continuously samples valve 1&2.
-   - Injection stops when LI-850 CO2 >= 1000 ppm, or at safety cutoff/timeout.
-
-5) 6 h post-injection raw decay logging:
-   - 10 min valve 1&2 chamber sampling.
-   - 2 min valve 3 room sampling.
-   - Repeat until duration is complete.
+3) Repeated internal-leak raw acquisition cycles, default n=3:
+   a) 2 min pre-injection stabilisation with valve 1&2 to LI-850.
+   b) CO2 MFC set to 200 mLn/min until chamber CO2 reaches 1000 ppm.
+   c) CO2 MFC set to zero.
+   d) Decay loop:
+      - 10 min valve 1&2 chamber sampling.
+      - 2 min valve 3 room sampling.
+      - Compare stable chamber and room CO2 means after switching carryover is excluded.
+      - End this decay cycle when |chamber CO2 - room CO2| < 10 ppm.
+   e) Repeat injection and decay until all cycles are complete.
 
 Outputs
 -------
@@ -91,9 +89,13 @@ MFC_FULL_SCALE_MLN_MIN = 200.0
 BASELINE_CHAMBER_S = 10 * 60
 BASELINE_ROOM_S = 10 * 60
 PRE_INJECTION_STABILIZE_S = 2 * 60
-DECAY_TOTAL_S = 6 * 60 * 60
 DECAY_CHAMBER_SAMPLE_S = 10 * 60
 DECAY_ROOM_SAMPLE_S = 2 * 60
+NUM_REPEATED_CYCLES = 3
+STOP_DIFF_PPM = 10.0
+SWITCH_DISCARD_S = 30.0
+DECISION_WINDOW_S = 60.0
+MAX_DECAY_HOURS_PER_CYCLE = 12.0
 
 # Injection settings
 INJECTION_FLOW_MLN_MIN = 200.0
@@ -103,7 +105,7 @@ INJECTION_MAX_DURATION_S = 20 * 60
 
 # Logging
 LOG_FOLDER = "DREAM_internal_leak_raw_logs"
-LOG_PREFIX = "DREAM_internal_leak_raw"
+LOG_PREFIX = "DREAM_internal_leak_3cycle_raw"
 
 
 @dataclass
@@ -287,12 +289,14 @@ class RawLogger:
         self.events_f = open(self.events_path, "w", newline="", encoding="utf-8")
         self.raw_writer = csv.writer(self.raw_f)
         self.events_writer = csv.writer(self.events_f)
+        self.current_protocol_cycle: Optional[int] = None
 
         raw_header = [
             "timestamp",
             "epoch_s",
             "elapsed_s",
             "phase",
+            "protocol_cycle",
             "sample_to_li850",
             "sample_switch_index",
             "seconds_since_sample_switch",
@@ -320,6 +324,7 @@ class RawLogger:
             "elapsed_s",
             "event",
             "phase",
+            "protocol_cycle",
             "sample_to_li850",
             "mfc_setpoint_mln_min",
             "mfc_actual_mln_min",
@@ -371,6 +376,7 @@ class RawLogger:
             f"{now - start_time:.3f}",
             event,
             phase,
+            "" if self.current_protocol_cycle is None else self.current_protocol_cycle,
             sample,
             f"{mfc_setpoint:.6f}",
             self.fmt(mfc_actual, 6),
@@ -403,6 +409,7 @@ class RawLogger:
             f"{now:.6f}",
             f"{now - start_time:.3f}",
             phase,
+            "" if self.current_protocol_cycle is None else self.current_protocol_cycle,
             sample,
             sample_switch_index,
             "" if sample_switch_time is None else f"{now - sample_switch_time:.3f}",
@@ -446,14 +453,18 @@ def write_metadata(out_dir: Path, run_prefix: str, args: argparse.Namespace):
     path = out_dir / f"{run_prefix}_run_metadata.json"
     metadata = {
         "created_local_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "script": "DREAM_internal_leak_raw_logger.py",
-        "purpose": "Raw acquisition only; no leak fitting or lag analysis during run.",
+        "script": "DREAM_internal_leak_3cycle_raw_logger.py",
+        "purpose": "Raw acquisition only; no leak fitting or lag analysis during run. Repeated injection-decay cycles stop when chamber and room CO2 are similar.",
         "args": vars(args),
         "protocol": {
             "baseline_chamber_s": args.baseline_chamber_s,
             "baseline_room_s": args.baseline_room_s,
             "pre_injection_stabilize_s": args.pre_injection_stabilize_s,
-            "decay_total_s": args.decay_hours * 3600.0,
+            "num_cycles": args.cycles,
+            "stop_diff_ppm": args.stop_diff_ppm,
+            "switch_discard_s": args.switch_discard_s,
+            "decision_window_s": args.decision_window_s,
+            "max_decay_hours_per_cycle": args.max_decay_hours_per_cycle,
             "decay_chamber_sample_s": args.decay_chamber_sample_s,
             "decay_room_sample_s": args.decay_room_sample_s,
             "chamber_sample": "1,2",
@@ -554,13 +565,26 @@ def acquire_for_duration(
     duration_s: float,
     note: str = "",
     status_interval_s: float = 30.0,
-):
+    switch_discard_s: float = SWITCH_DISCARD_S,
+    decision_window_s: float = DECISION_WINDOW_S,
+) -> dict:
+    """Acquire raw LI-850 readings for a fixed duration and return a small online summary.
+
+    The summary is used only to decide when to end a repeated decay cycle.
+    All raw data remain logged. The decision mean excludes readings collected
+    immediately after a multiplexer switch, then uses the last decision_window_s
+    of the stable segment.
+    """
     end = time.time() + duration_s
     last_status = 0.0
+    stable_points: list[tuple[float, float]] = []
+    total_valid = 0
+
     while time.time() < end:
         reading = li850.read_one()
         if reading is None:
             continue
+        total_valid += 1
         actual = read_mfc_actual_periodically(mfc, state)
         logger.log_reading(
             start_time=start_time,
@@ -577,6 +601,13 @@ def acquire_for_duration(
             injection_stop_time=state.injection_stop_time,
             note=note,
         )
+
+        seconds_since_switch = None
+        if state.sample_switch_time is not None:
+            seconds_since_switch = reading.timestamp - state.sample_switch_time
+        if seconds_since_switch is None or seconds_since_switch >= switch_discard_s:
+            stable_points.append((reading.timestamp, reading.co2_ppm))
+
         now = time.time()
         if now - last_status >= status_interval_s:
             print(
@@ -585,6 +616,28 @@ def acquire_for_duration(
                 f"MFC act={safe_fmt(actual, 2)} | remaining={max(0.0, end-now)/60:.1f} min"
             )
             last_status = now
+
+    decision_points = []
+    if stable_points:
+        last_t = stable_points[-1][0]
+        decision_points = [(t, c) for t, c in stable_points if last_t - t <= decision_window_s]
+
+    mean_co2 = None
+    last_co2 = None
+    if decision_points:
+        vals = [c for _, c in decision_points]
+        mean_co2 = sum(vals) / len(vals)
+        last_co2 = vals[-1]
+
+    return {
+        "total_valid_readings": total_valid,
+        "stable_readings": len(stable_points),
+        "decision_readings": len(decision_points),
+        "decision_mean_co2_ppm": mean_co2,
+        "decision_last_co2_ppm": last_co2,
+        "switch_discard_s": switch_discard_s,
+        "decision_window_s": decision_window_s,
+    }
 
 
 def acquire_injection_until_target(
@@ -683,7 +736,11 @@ def parse_args():
     p.add_argument("--target-co2", type=float, default=INJECTION_TARGET_CO2_PPM)
     p.add_argument("--safety-cutoff", type=float, default=INJECTION_SAFETY_CUTOFF_PPM)
     p.add_argument("--injection-max-duration-s", type=float, default=INJECTION_MAX_DURATION_S)
-    p.add_argument("--decay-hours", type=float, default=6.0)
+    p.add_argument("--cycles", type=int, default=NUM_REPEATED_CYCLES, help="Number of injection-decay cycles to run.")
+    p.add_argument("--stop-diff-ppm", type=float, default=STOP_DIFF_PPM, help="Stop a decay cycle when |chamber CO2 - room CO2| is below this threshold.")
+    p.add_argument("--switch-discard-s", type=float, default=SWITCH_DISCARD_S, help="Seconds after each valve switch excluded from online stop-decision means.")
+    p.add_argument("--decision-window-s", type=float, default=DECISION_WINDOW_S, help="Use the last N seconds of stable readings to calculate chamber/room means for the stop decision.")
+    p.add_argument("--max-decay-hours-per-cycle", type=float, default=MAX_DECAY_HOURS_PER_CYCLE, help="Safety maximum for each decay cycle; prevents infinite runs if the threshold is not reached.")
     p.add_argument("--baseline-chamber-s", type=float, default=BASELINE_CHAMBER_S)
     p.add_argument("--baseline-room-s", type=float, default=BASELINE_ROOM_S)
     p.add_argument("--pre-injection-stabilize-s", type=float, default=PRE_INJECTION_STABILIZE_S)
@@ -701,7 +758,7 @@ def main():
     logger = RawLogger(out_dir, run_prefix, include_raw_xml=args.include_raw_xml)
     metadata_path = write_metadata(out_dir, run_prefix, args)
 
-    print("\nDREAM internal leak RAW logger")
+    print("\nDREAM internal leak 3-cycle RAW logger")
     print("--------------------------------")
     print(f"LI-850 port:        {args.li850_port}")
     print(f"Multiplexer port:   {args.mux_port}")
@@ -709,7 +766,9 @@ def main():
     print(f"CO2 MFC address:    {args.mfc_address}")
     print(f"Injection flow:     {args.injection_flow:.3f} mLn/min")
     print(f"Target CO2:         {args.target_co2:.1f} ppm")
-    print(f"Decay duration:     {args.decay_hours:.2f} h")
+    print(f"Repeated cycles:    {args.cycles}")
+    print(f"Stop threshold:     |chamber-room| < {args.stop_diff_ppm:.2f} ppm")
+    print(f"Max decay/cycle:    {args.max_decay_hours_per_cycle:.2f} h")
     print(f"Output folder:      {out_dir}")
     print(f"Raw CSV:            {logger.raw_path}")
     print(f"Events CSV:         {logger.events_path}")
@@ -767,114 +826,222 @@ def main():
             note="room baseline; sample valve 3",
         )
 
-        # 3. Pre-injection stabilisation.
-        state.phase = "pre_injection_stabilization_v1v2"
-        set_mux_sample(mux, logger, start_time, state, "1,2", "2 min stabilisation before CO2 injection")
-        acquire_for_duration(
-            li850=li850,
-            mfc=mfc,
-            logger=logger,
-            start_time=start_time,
-            state=state,
-            duration_s=args.pre_injection_stabilize_s,
-            note="pre-injection chamber stabilisation",
-        )
+        # 3. Repeated injection-decay cycles.
+        for cycle in range(1, int(args.cycles) + 1):
+            logger.current_protocol_cycle = cycle
+            logger.log_event(
+                start_time=start_time,
+                event="cycle_start",
+                phase="cycle_start",
+                sample=state.sample,
+                mfc_setpoint=state.mfc_setpoint,
+                mfc_actual=state.last_mfc_actual,
+                details=f"Starting injection-decay cycle {cycle} of {args.cycles}",
+            )
 
-        # 4. Injection.
-        state.phase = "co2_injection_v1v2"
-        state.injection_start_time = time.time()
-        set_mfc_flow(
-            mfc,
-            logger,
-            start_time,
-            state,
-            args.injection_flow,
-            "mfc_on_command",
-            f"Start injection to target {args.target_co2:.3f} ppm",
-        )
-        injection_result, final_co2 = acquire_injection_until_target(
-            li850=li850,
-            mfc=mfc,
-            logger=logger,
-            start_time=start_time,
-            state=state,
-            target_co2_ppm=args.target_co2,
-            safety_cutoff_ppm=args.safety_cutoff,
-            max_duration_s=args.injection_max_duration_s,
-        )
+            # 3a. Pre-injection stabilisation.
+            state.phase = f"cycle_{cycle}_pre_injection_stabilization_v1v2"
+            state.injection_start_time = None
+            state.injection_stop_time = None
+            set_mux_sample(
+                mux,
+                logger,
+                start_time,
+                state,
+                "1,2",
+                f"cycle {cycle}; 2 min stabilisation before CO2 injection",
+            )
+            acquire_for_duration(
+                li850=li850,
+                mfc=mfc,
+                logger=logger,
+                start_time=start_time,
+                state=state,
+                duration_s=args.pre_injection_stabilize_s,
+                note=f"cycle {cycle}; pre-injection chamber stabilisation",
+                switch_discard_s=args.switch_discard_s,
+                decision_window_s=args.decision_window_s,
+            )
 
-        state.injection_stop_time = time.time()
-        set_mfc_flow(
-            mfc,
-            logger,
-            start_time,
-            state,
-            0.0,
-            "mfc_off_command",
-            f"Injection result={injection_result}; final_CO2={final_co2}",
-        )
+            # 3b. Injection.
+            state.phase = f"cycle_{cycle}_co2_injection_v1v2"
+            state.injection_start_time = time.time()
+            state.injection_stop_time = None
+            set_mfc_flow(
+                mfc,
+                logger,
+                start_time,
+                state,
+                args.injection_flow,
+                "mfc_on_command",
+                f"cycle {cycle}; start injection to target {args.target_co2:.3f} ppm",
+            )
+            injection_result, final_co2 = acquire_injection_until_target(
+                li850=li850,
+                mfc=mfc,
+                logger=logger,
+                start_time=start_time,
+                state=state,
+                target_co2_ppm=args.target_co2,
+                safety_cutoff_ppm=args.safety_cutoff,
+                max_duration_s=args.injection_max_duration_s,
+            )
 
-        if injection_result == "timeout":
-            raise RuntimeError("Injection timeout. MFC has been set to zero; raw data were saved.")
-        if injection_result == "safety_cutoff":
-            raise RuntimeError("Injection safety cutoff reached. MFC has been set to zero; raw data were saved.")
+            state.injection_stop_time = time.time()
+            set_mfc_flow(
+                mfc,
+                logger,
+                start_time,
+                state,
+                0.0,
+                "mfc_off_command",
+                f"cycle {cycle}; injection result={injection_result}; final_CO2={final_co2}",
+            )
 
-        # 5. Decay loop: 10 min chamber, 2 min room.
-        state.phase = "decay_loop"
-        decay_start = time.time()
-        logger.log_event(
-            start_time=start_time,
-            event="decay_start",
-            phase=state.phase,
-            sample=state.sample,
-            mfc_setpoint=state.mfc_setpoint,
-            mfc_actual=state.last_mfc_actual,
-            details=f"Starting {args.decay_hours:.3f} h decay loop",
-        )
+            if injection_result == "timeout":
+                raise RuntimeError(f"Cycle {cycle}: injection timeout. MFC has been set to zero; raw data were saved.")
+            if injection_result == "safety_cutoff":
+                raise RuntimeError(f"Cycle {cycle}: injection safety cutoff reached. MFC has been set to zero; raw data were saved.")
 
-        decay_end = decay_start + args.decay_hours * 3600.0
-        cycle = 0
-        while time.time() < decay_end:
-            cycle += 1
-            state.phase = "decay_chamber_v1v2"
-            set_mux_sample(mux, logger, start_time, state, "1,2", f"decay cycle {cycle}; chamber sample")
-            chamber_duration = min(args.decay_chamber_sample_s, max(0.0, decay_end - time.time()))
-            if chamber_duration > 0:
-                acquire_for_duration(
+            # 3c. Decay loop: 10 min chamber, 2 min room, repeated until chamber-room difference < threshold.
+            state.phase = f"cycle_{cycle}_decay_loop"
+            decay_start = time.time()
+            max_decay_end = decay_start + args.max_decay_hours_per_cycle * 3600.0
+            logger.log_event(
+                start_time=start_time,
+                event="decay_start",
+                phase=state.phase,
+                sample=state.sample,
+                mfc_setpoint=state.mfc_setpoint,
+                mfc_actual=state.last_mfc_actual,
+                details=(
+                    f"cycle {cycle}; stopping when |chamber-room| < {args.stop_diff_ppm:.3f} ppm; "
+                    f"safety max {args.max_decay_hours_per_cycle:.3f} h"
+                ),
+            )
+
+            decay_segment = 0
+            last_chamber_mean = None
+            last_room_mean = None
+            stop_reason = ""
+
+            while True:
+                if time.time() >= max_decay_end:
+                    stop_reason = "max_decay_time_reached"
+                    logger.log_event(
+                        start_time=start_time,
+                        event="decay_max_time_reached",
+                        phase=state.phase,
+                        sample=state.sample,
+                        mfc_setpoint=state.mfc_setpoint,
+                        mfc_actual=state.last_mfc_actual,
+                        details=f"cycle {cycle}; max decay time reached before < {args.stop_diff_ppm:.3f} ppm difference",
+                    )
+                    break
+
+                decay_segment += 1
+
+                state.phase = f"cycle_{cycle}_decay_chamber_v1v2"
+                set_mux_sample(mux, logger, start_time, state, "1,2", f"cycle {cycle}; decay segment {decay_segment}; chamber sample")
+                chamber_summary = acquire_for_duration(
                     li850=li850,
                     mfc=mfc,
                     logger=logger,
                     start_time=start_time,
                     state=state,
-                    duration_s=chamber_duration,
-                    note=f"decay cycle {cycle}; chamber sample valve 1&2",
+                    duration_s=args.decay_chamber_sample_s,
+                    note=f"cycle {cycle}; decay segment {decay_segment}; chamber sample valve 1&2",
+                    switch_discard_s=args.switch_discard_s,
+                    decision_window_s=args.decision_window_s,
                 )
+                last_chamber_mean = chamber_summary.get("decision_mean_co2_ppm")
 
-            if time.time() >= decay_end:
-                break
-
-            state.phase = "decay_room_v3"
-            set_mux_sample(mux, logger, start_time, state, "3", f"decay cycle {cycle}; room check")
-            room_duration = min(args.decay_room_sample_s, max(0.0, decay_end - time.time()))
-            if room_duration > 0:
-                acquire_for_duration(
+                state.phase = f"cycle_{cycle}_decay_room_v3"
+                set_mux_sample(mux, logger, start_time, state, "3", f"cycle {cycle}; decay segment {decay_segment}; room check")
+                room_summary = acquire_for_duration(
                     li850=li850,
                     mfc=mfc,
                     logger=logger,
                     start_time=start_time,
                     state=state,
-                    duration_s=room_duration,
-                    note=f"decay cycle {cycle}; room sample valve 3",
+                    duration_s=args.decay_room_sample_s,
+                    note=f"cycle {cycle}; decay segment {decay_segment}; room sample valve 3",
+                    switch_discard_s=args.switch_discard_s,
+                    decision_window_s=args.decision_window_s,
+                )
+                last_room_mean = room_summary.get("decision_mean_co2_ppm")
+
+                if last_chamber_mean is None or last_room_mean is None:
+                    logger.log_event(
+                        start_time=start_time,
+                        event="decay_stop_check_insufficient_data",
+                        phase=state.phase,
+                        sample=state.sample,
+                        mfc_setpoint=state.mfc_setpoint,
+                        mfc_actual=state.last_mfc_actual,
+                        details=(
+                            f"cycle {cycle}; segment {decay_segment}; "
+                            f"chamber_mean={last_chamber_mean}; room_mean={last_room_mean}"
+                        ),
+                    )
+                    continue
+
+                diff_ppm = abs(last_chamber_mean - last_room_mean)
+                logger.log_event(
+                    start_time=start_time,
+                    event="decay_stop_check",
+                    phase=state.phase,
+                    sample=state.sample,
+                    mfc_setpoint=state.mfc_setpoint,
+                    mfc_actual=state.last_mfc_actual,
+                    details=(
+                        f"cycle {cycle}; segment {decay_segment}; "
+                        f"chamber_mean={last_chamber_mean:.3f} ppm; "
+                        f"room_mean={last_room_mean:.3f} ppm; "
+                        f"abs_diff={diff_ppm:.3f} ppm; threshold={args.stop_diff_ppm:.3f} ppm"
+                    ),
+                )
+                print(
+                    f"[CYCLE {cycle}] decay segment {decay_segment}: "
+                    f"chamber={last_chamber_mean:.2f} ppm, room={last_room_mean:.2f} ppm, "
+                    f"diff={diff_ppm:.2f} ppm"
                 )
 
+                if diff_ppm < args.stop_diff_ppm:
+                    stop_reason = "chamber_room_difference_below_threshold"
+                    logger.log_event(
+                        start_time=start_time,
+                        event="decay_threshold_reached",
+                        phase=state.phase,
+                        sample=state.sample,
+                        mfc_setpoint=state.mfc_setpoint,
+                        mfc_actual=state.last_mfc_actual,
+                        details=(
+                            f"cycle {cycle}; abs_diff={diff_ppm:.3f} ppm < {args.stop_diff_ppm:.3f} ppm; "
+                            "ending decay and moving to next injection cycle"
+                        ),
+                    )
+                    break
+
+            logger.log_event(
+                start_time=start_time,
+                event="cycle_complete",
+                phase=state.phase,
+                sample=state.sample,
+                mfc_setpoint=state.mfc_setpoint,
+                mfc_actual=state.last_mfc_actual,
+                details=f"cycle {cycle} complete; stop_reason={stop_reason}",
+            )
+
+        logger.current_protocol_cycle = None
         logger.log_event(
             start_time=start_time,
-            event="decay_complete",
+            event="all_cycles_complete",
             phase=state.phase,
             sample=state.sample,
             mfc_setpoint=state.mfc_setpoint,
             mfc_actual=state.last_mfc_actual,
-            details="Requested decay duration completed",
+            details=f"Completed {args.cycles} injection-decay cycles",
         )
 
     except KeyboardInterrupt:
