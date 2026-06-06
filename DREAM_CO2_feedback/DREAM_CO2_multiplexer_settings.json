@@ -1,0 +1,12 @@
+{
+  "serial_port": "COM31",
+  "baudrate": 115200,
+  "last_sample": "1,2",
+  "purge_s": 10.0,
+  "record_s": 15.0,
+  "cycle_samples": [
+    "1",
+    "2",
+    "1,2"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "created_local_time": "2026-06-06 19:27:58",
+  "script": "DREAM_internal_leak_raw_logger.py",
+  "purpose": "Raw acquisition only; no leak fitting or lag analysis during run.",
+  "args": {
+    "li850_port": "COM11",
+    "mux_port": "COM31",
+    "mfc_port": "COM5",
+    "mfc_address": 6,
+    "mfc_full_scale": 200.0,
+    "injection_flow": 200.0,
+    "target_co2": 1000.0,
+    "safety_cutoff": 1200.0,
+    "injection_max_duration_s": 1200,
+    "decay_hours": 6.0,
+    "baseline_chamber_s": 600,
+    "baseline_room_s": 600,
+    "pre_injection_stabilize_s": 120,
+    "decay_chamber_sample_s": 600,
+    "decay_room_sample_s": 120,
+    "log_folder": "DREAM_internal_leak_raw_logs",
+    "log_prefix": "DREAM_internal_leak_raw",
+    "include_raw_xml": false
+  },
+  "protocol": {
+    "baseline_chamber_s": 600,
+    "baseline_room_s": 600,
+    "pre_injection_stabilize_s": 120,
+    "decay_total_s": 21600.0,
+    "decay_chamber_sample_s": 600,
+    "decay_room_sample_s": 120,
+    "chamber_sample": "1,2",
+    "room_sample": "3"
+  },
+  "notes_for_lag_analysis": [
+    "Use events.csv mfc_on_command as t0 for injection-response lag.",
+    "Use raw_li850.csv seconds_since_injection_start to identify first detectable CO2 rise.",
+    "Use events.csv mfc_off_command / injection_stop_target_reached to examine post-injection delay and overshoot.",
+    "Use seconds_since_sample_switch to quantify multiplexer/tubing carryover after switching 1,2 <-> 3."
+  ]
+}

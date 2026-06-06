@@ -1,0 +1,9 @@
+{
+  "device_name": "DREAM_CO2_Multiplexer",
+  "default_sample": "1,2,3",
+  "heartbeat_interval_s": 0.0,
+  "valve_active_high": true,
+  "bypass_pump_enabled": false,
+  "bypass_pump_active_high": true,
+  "bypass_pump_pin": "A3"
+}

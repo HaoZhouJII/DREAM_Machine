@@ -1,0 +1,8 @@
+timestamp,epoch_s,elapsed_s,event,phase,sample_to_li850,mfc_setpoint_mln_min,mfc_actual_mln_min,details
+2026-06-06 19:28:00.393,1780766880.393513,2.093,run_start,initialising,,0.000000,,Raw data acquisition started
+2026-06-06 19:28:00.431,1780766880.431294,2.131,mfc_zero_initial,mfc_zero_initial,,0.000000,0.000000,OK; Initial safety zero
+2026-06-06 19:28:02.493,1780766882.493300,4.193,sample_switch_command,baseline_chamber_v1v2,"1,2",0.000000,0.000000,"10 min chamber baseline; valve 3 bypass; mux_status=SAMPLING: 1,2 | V1 LI-850 | V2 LI-850 | V3 bypass"
+2026-06-06 19:28:30.897,1780766910.897233,32.597,keyboard_interrupt,baseline_chamber_v1v2,"1,2",0.000000,0.000000,User interrupted run
+2026-06-06 19:28:30.931,1780766910.931170,32.631,mfc_zero_on_exit,exit,"1,2",0.000000,0.000000,OK; Final safety zero
+2026-06-06 19:28:31.978,1780766911.978366,33.678,mux_return_all_to_li850,exit,"1,2,3",0.000000,0.000000,"Returned multiplexer to 1,2,3 before exit"
+2026-06-06 19:28:31.987,1780766911.987807,33.687,run_end,exit,"1,2",0.000000,0.000000,Raw data acquisition ended

@@ -11,6 +11,12 @@ set "VENV_PY=%PROJECT_DIR%\venv\Scripts\python.exe"
 
 cd /d "%LED_DIR%"
 
+echo Running GUI from:
+echo %CD%\DREAM_LED_control_panel.py
+echo.
+dir DREAM_LED_control_panel.py
+echo.
+
 if exist "%VENV_PY%" (
     "%VENV_PY%" DREAM_LED_control_panel.py
 ) else (

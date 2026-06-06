@@ -1,11 +1,14 @@
 # run_dream_led.py
-# User settings for DREAM LED system
+# Optional command-line runner for DREAM LED system.
 #
-# Run from VS Code / PowerShell with:
+# Normal GUI use:
+#   Start_DREAM_LED_Control_Panel.bat
+#
+# Command-line use:
 #   py run_dream_led.py
 #
-# This file should contain only user settings.
-# All functions are in DREAM_LED_PC.py.
+# This file is optional if you only use the GUI.
+# All reusable functions are in DREAM_LED_PC.py.
 
 from DREAM_LED_PC import run_dream_led_system
 
@@ -25,8 +28,6 @@ EXPECTED_DEVICES = [
 
 # ==========================================================
 # MANUAL COM PORTS
-#
-# Update these if Windows changes the COM numbers.
 # ==========================================================
 
 MANUAL_PORTS = {
@@ -41,7 +42,7 @@ MANUAL_PORTS = {
 
 
 # ==========================================================
-# LIGHT SCHEDULE
+# FIXED LIGHT SCHEDULE
 # ==========================================================
 
 LIGHT_ON_TIME = "08:00"
@@ -52,30 +53,13 @@ LIGHT_OFF_TIME = "20:00"
 # OPERATION MODE
 # ==========================================================
 
-# Recommended:
-#   False = initialise once, then exit. More stable.
-#   True  = keep checking STATUS every STATUS_INTERVAL_S seconds.
 KEEP_MONITORING = False
 STATUS_INTERVAL_S = 60
-
-
-# If True, Ctrl+C turns all connected LEDs off.
-# If False, Ctrl+C leaves RP2040 controllers running their schedule.
 TURN_OFF_ON_CTRL_C = False
 
-
-# Heartbeat is printed by each RP2040 every 30 s by default.
-# Useful for diagnosing whether a Pico is alive or rebooting.
-#
-# For normal long-term operation, you can leave heartbeat ON.
-# If too much serial output is unwanted, set HEARTBEAT_AFTER_CONFIG = "OFF".
-#
-# Options:
-#   "ON"
-#   "OFF"
-#   None  = do not change current heartbeat setting on Pico
 HEARTBEAT_AFTER_CONFIG = "ON"
 SCAN_I2C_AFTER_CONNECT = True
+
 
 # ==========================================================
 # SERIAL SETTINGS
@@ -88,7 +72,7 @@ READ_EXTRA_S = 0.20
 
 
 # ==========================================================
-# FINE-TUNING TABLE
+# FIXED LIGHT SETTINGS
 #
 # Structure:
 # DEVICE_ID -> DAC address -> channel -> output percentage
@@ -113,18 +97,17 @@ LED_SETTINGS = {
         "0x62": {"A": 9.0, "B": 0.5, "C": 0.5, "D": 0.0},
     },
 
-    # Add later when UV/IR controllers are connected:
-    # "UVIR_LED_RP2040_1": {
-    #     "0x60": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    #     "0x61": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    #     "0x62": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    # },
-    #
-    # "UVIR_LED_RP2040_2": {
-    #     "0x60": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    #     "0x61": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    #     "0x62": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
-    # },
+    "UVIR_LED_RP2040_1": {
+        "0x60": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+        "0x61": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+        "0x62": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+    },
+
+    "UVIR_LED_RP2040_2": {
+        "0x60": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+        "0x61": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+        "0x62": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+    },
 }
 
 
